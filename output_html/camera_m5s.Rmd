@@ -1,0 +1,891 @@
+---
+title: "Italian general election, 2018 : Chamber of Deputies : Five Star Movement"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    css: style.css
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+
+require(knitr)
+opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE)
+
+library(flexdashboard)
+
+require(leaflet)
+require(rgdal)
+
+camera_sp <- readOGR('/Users/francesco/public_git/scrape_2018_ita_ge_results/output_shapefiles/', layer = 'minint_camera_005')
+
+require(rgdal)
+
+library(DBI)
+library(RPostgreSQL)
+library(rpostgis)
+options(scipen=999)
+
+conn <- dbConnect(
+  drv = PostgreSQL(),
+  dbname = "istat_sez2011",
+  host = "localhost",
+  port = "5432",
+  user = "francesco",
+  password = "")
+
+```
+
+```{r}
+res_camera <- dbGetQuery(conn, "SELECT votes, perc, minint_code FROM ita_ge18.minint_camera_candidate_votes WHERE coalizione = 'M5S';")
+
+
+res_camera_other_candidate <- dbGetQuery(conn, "SELECT perc AS \"M5S\", minint_code FROM ita_ge18.minint_camera_candidate_votes WHERE coalizione = 'M5S';")
+
+res_camera_other_party <- dbGetQuery(conn, "SELECT * FROM ita_ge18.minint_camera_party_votes WHERE 
+                               partito = 'PD' OR  partito = 'Lega' OR  partito = 'FI';")
+require(reshape2)
+res_camera_other_party <- 
+  dcast(data = res_camera_other_party, 
+        formula = minint_code ~ partito, value.var = 'perc')
+res_place_stats <- dbGetQuery(conn, "SELECT * FROM ita_ge18.minint_camera_place_stats;")
+
+res_camera <- merge(res_camera, res_camera_other_candidate,
+                    by = 'minint_code')
+res_camera <- merge(res_camera, res_camera_other_party,
+                    by = 'minint_code')
+res_camera <- merge(res_camera, 
+                    res_place_stats, 
+                    by = 'minint_code')
+
+camera_sp <- merge(camera_sp, res_camera, by.x = 'minint_cod', by.y = 'minint_code')
+
+assignMacroRegion <- function(x) {
+  if (x %in% c('Piemonte','Lombardia',
+               'Liguria',"Valle d'Aosta/Vallée d'Aoste")) {
+    return('North-west')
+  }
+  if(x %in% c('Veneto','Friuli-Venezia Giulia',
+              "Trentino-Alto Adige/Südtirol",
+              "Emilia-Romagna")) {
+    return('North-east')
+  }
+  if (x %in% c("Toscana", "Umbria", "Marche", "Lazio")) {
+    return('Centre')
+  }
+  if (x %in% c("Abruzzo", "Puglia", "Basilicata", 
+               "Campania", "Calabria", "Molise")) {
+    return('South')
+  }
+  if (x %in% c("Sicilia", "Sardegna")) {
+    return("Islands")
+  }
+}
+
+res_geo_details <- 
+  dbGetQuery(conn, "SELECT minint_geopol_cod AS minint_cod,
+             ST_Area(ST_Transform(geom, 32632)) AS area
+             FROM ita_ge18.subcomuni2018_camera_geo;")
+
+res_demographics <-
+  dbGetQuery(conn, "SELECT * FROM ita_ge18.subcomuni2018_census2011_demographics;")
+
+```
+
+Vote (2018)
+=====================================  
+
+Column {data-width=600}
+-------------------------------------
+
+### Vote at commune and sub-commune level
+
+```{r}
+
+italy_box_y <- c(36, 47.5)
+italy_box_x <- c(6.1, 19.5) 
+
+pal <- colorNumeric(palette = "YlGnBu", domain = camera_sp$perc)
+
+leaflet(camera_sp) %>%
+  addPolygons(stroke = TRUE, color = 'gray', weight = 0.15, smoothFactor = 0.2, fillOpacity = 0.87,
+              fillColor = ~pal(perc),
+              popup = ~paste0("Comune: <b>",
+                              istat_nom,"</b></br>Collegio: ", uninom_nom, " (",uninom_cod,")", 
+                              "</br></br><b>M5S</b>: ", round(M5S*100, 0),"%",
+                              "</br><b>PD</b>: ", round(PD*100, 0),"%",
+                              "</br><b>Lega</b>: ", round(Lega*100, 0),"%",
+                              "</br><b>FI</b>: ", round(FI*100, 0),"%",
+                              "</br></br>Turnout: ", round(turnout*100, 0),"%",
+                              "</br>Count: ", round(sezioni_scrutinate/sezioni_totali*100, 0),"%",
+                              "</br></br>Source: <a href='http://elezioni.interno.gov.it/camera/scrutini/20180304/", minint_cod,"' _target='blank'>Ministero Interno</a>"),
+              highlight = highlightOptions(
+                weight = 4,
+                color = "black",
+                dashArray = "",
+                fillOpacity = 0.9,
+                bringToFront = TRUE)) %>%
+  setView(lng= 13, lat=41.8, zoom=6) %>%
+  addProviderTiles(providers$Stamen.TonerLite) %>%
+  addLegend("bottomleft", pal = pal, values = ~perc, opacity = 1,
+            title = NA, labFormat = labelFormat(suffix = "%", transform = function(x) x*100))
+
+```
+
+
+Column {.tabset}
+-------------------------------------
+
+```{r setup2}
+require(ggplot2)
+require(scales)
+
+camera_df <- as.data.frame(camera_sp)
+camera_df$macro_region <- sapply(camera_df$regione, assignMacroRegion)
+camera_df$macro_region <- factor(camera_df$macro_region, 
+                                 levels = c("North-west", "North-east",
+                                            "Centre", "South", "Islands" ))
+
+camera_df <- merge(camera_df, res_geo_details, by = 'minint_cod')
+camera_df <- merge(camera_df, res_demographics, by.x = 'minint_cod', by.y = 'minint_geopol_cod')
+
+camera_df$pop_density <- camera_df$pop2011/camera_df$area
+camera_df$unemployment <- camera_df$popunemployed2011/camera_df$popnotworkforce2011
+
+camera_df$housewive_perc <- camera_df$pophousewife2011/camera_df$popnotworkforce2011
+camera_df$over65_perc <- camera_df$pop65over2011/camera_df$pop2011
+camera_df$degree_perc <- camera_df$popdegree2011/camera_df$pop2011
+
+camera_df$foreignpop_perc <- camera_df$foreignpop2011/camera_df$pop2011
+camera_df$foreignpop_africa_perc <- camera_df$foreignpopafrica2011/camera_df$pop2011
+
+camera_df <- subset(camera_df, sezioni_scrutinate > 0)
+
+```   
+
+
+### M5S Vote distribution 
+
+```{r, fig.width = 6, fig.height= 4, fig.cap=paste0("$n$=", nrow(camera_df), " | Source: Ministero Interno (2018)")}
+ggplot(camera_df, aes(perc, fill = macro_region)) + geom_density(alpha = 0.6) + theme_bw() + 
+  scale_x_continuous(labels=percent) + 
+  labs(x=NULL) + 
+  geom_vline(xintercept = median(camera_df$perc)) +
+  guides(fill=guide_legend(title="Macro region"))
+```
+
+
+```{r}
+this_mod <- lm(perc~turnout, data = subset(camera_df, turnout < 1))
+```
+
+
+### M5S Vote / turnout
+
+```{r, fig.cap=paste0("$n$=", nrow(subset(camera_df, turnout < 1)), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018)")}
+ggplot() + 
+  geom_point(data = 
+               subset(camera_df, turnout < 1), 
+             aes(perc, turnout, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = subset(camera_df, turnout < 1), 
+              aes(perc, turnout),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='vote') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+```{r}
+this_mod <- lm(perc~PD, data = camera_df)
+```
+
+
+### M5S/PD vote
+
+```{r, fig.cap=paste0("$n$=", nrow(camera_df), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018)" )}
+ggplot() + 
+  geom_point(data = camera_df, 
+             aes(perc, PD, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = camera_df, 
+              aes(perc, PD),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote', y='PD vote') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+```{r}
+this_mod <- lm(perc~Lega, data = camera_df)
+```
+
+
+### M5S/Lega vote
+
+```{r, fig.cap=paste0("$n$=", nrow(camera_df), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018)")}
+ggplot() + 
+  geom_point(data = camera_df, 
+             aes(perc, Lega, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = camera_df, 
+              aes(perc, Lega),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote', y='Lega vote') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+```{r}
+this_mod <- lm(perc~FI, data = camera_df)
+```
+
+
+### M5S/FI vote
+
+```{r, fig.cap=paste0("$n$=", nrow(camera_df), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018)")}
+ggplot() + 
+  geom_point(data = camera_df, 
+             aes(perc, FI, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = camera_df, 
+              aes(perc, FI),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote', y='FI vote') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+```{r}
+this_mod <- lm(perc~log(pop_density), data = camera_df)
+```
+
+
+### M5S vote/Pop. density
+
+```{r, fig.cap=paste0("$n$=", nrow(camera_df), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = camera_df, 
+             aes(perc, log(pop_density), color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = camera_df, 
+              aes(perc, log(pop_density)),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  labs(x='M5S vote', y='← lower   Commune population density (log)   higher →') + 
+  theme_bw() +
+  theme(axis.text.y = element_blank()) +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+### M5S vote/Unemployment
+
+```{r}
+this_mod <- lm(perc~unemployment, data = camera_df)
+```
+
+```{r, fig.cap=paste0("$n$=", nrow(camera_df), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = camera_df, 
+             aes(perc, unemployment, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = camera_df, 
+              aes(perc, unemployment),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote', y='Unemployed over total workforce') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+
+### M5S vote/Housewives
+
+```{r}
+this_mod <- lm(perc~housewive_perc, data = camera_df)
+```
+
+```{r, fig.cap=paste0("$n$=", nrow(camera_df), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = camera_df, 
+             aes(perc, housewive_perc, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = camera_df, 
+              aes(perc, housewive_perc),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote', y='Housewives over total workforce') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+### M5S vote/Over 65
+
+```{r}
+this_mod <- lm(perc~over65_perc, data = camera_df)
+```
+
+```{r, fig.cap=paste0("$n$=", nrow(camera_df), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = camera_df, 
+             aes(perc, over65_perc, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = camera_df, 
+              aes(perc, over65_perc),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote', y='People older than 65 over total population ') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+### M5S vote/Univ. degree
+
+```{r}
+this_mod <- lm(perc~degree_perc, data = camera_df)
+```
+
+```{r, fig.cap=paste0("$n$=", nrow(camera_df), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = camera_df, 
+             aes(perc, degree_perc, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = camera_df, 
+              aes(perc, degree_perc),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote', y='With university degree over total population') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+### M5S vote/Foreign pop.
+
+```{r}
+this_mod <- lm(perc~foreignpop_perc, data = camera_df)
+```
+
+```{r, fig.cap=paste0("$n$=", nrow(camera_df), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = camera_df, 
+             aes(perc, foreignpop_perc, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = camera_df, 
+              aes(perc, foreignpop_perc),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote', y='Foreign population over total population') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+### M5S vote/Foreign African pop.
+
+```{r}
+this_mod <- lm(perc~foreignpop_africa_perc, data = camera_df)
+```
+
+```{r, fig.cap=paste0("$n$=", nrow(camera_df), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = camera_df, 
+             aes(perc, foreignpop_africa_perc, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = camera_df, 
+              aes(perc, foreignpop_africa_perc),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote', y='Foreign African population over total population') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+
+```{r setup3, include=FALSE}
+
+require(reshape2)
+
+comuni_sp <- readOGR('/Users/francesco/public_git/scrape_2018_ita_ge_results/output_shapefiles/', layer = 'istat_comuni_2018_005')
+
+comuni2018_camera2013 <- dbReadTable(conn, c("ita_ge18", "comuni2018_camera2013"))
+
+# Dissolve
+comuni_to_merge <- 
+  as.character(comuni_sp$PRO_COM_T[!comuni_sp$PRO_COM_T %in% comuni2018_camera2013$PRO_COM_T_2018])
+comuni_sp$PRO_COM_T <- as.character(comuni_sp$PRO_COM_T)
+comuni_sp$PRO_COM_T[comuni_sp$PRO_COM_T %in% comuni_to_merge] <- 'dissolved1'
+  
+# require(rmapshaper)
+# comuni_sp <- ms_dissolve(comuni_sp, field = 'PRO_COM_T')
+
+comuni2018_candidate_votes <- 
+  dbReadTable(conn, c("ita_ge18", "comuni2018_camera_candidate_votes"))
+comuni2018_party_votes <- 
+  dbReadTable(conn, c("ita_ge18", "comuni2018_camera_party_votes"))
+
+comuni_sp <- merge(comuni_sp, comuni2018_camera2013[,c('PRO_COM_T_2018','PDL','LN','M5S','PD','ppdt_nRegisteredVoters', 'ppdt_nAssignedVotes')], by.x='PRO_COM_T', by.y='PRO_COM_T_2018')
+names(comuni_sp)[13:18] <- paste0(names(comuni_sp)[13:18], "_2013")
+
+comuni2018_candidate_votes <- subset(comuni2018_candidate_votes, coalizione == 'M5S')
+comuni2018_candidate_votes <- comuni2018_candidate_votes[,c('PRO_COM_T','votes')]
+names(comuni2018_candidate_votes) <- c("PRO_COM_T","M5S")
+
+# test <- comuni2018_party_votes[,c("PRO_COM_T","partito")]
+# comuni2018_party_votes$dup <- duplicated(test) | duplicated(test, fromLast = T)
+
+comuni2018_party_votes <- 
+  dcast(data = subset(comuni2018_party_votes, partito %in% c("PD","FI","Lega")), 
+        formula = PRO_COM_T ~ partito, value.var = 'votes')
+
+comuni2018_place_stats <- 
+  dbReadTable(conn, c("ita_ge18", "comuni2018_camera_place_stats"))
+names(comuni2018_place_stats)[names(comuni2018_place_stats) == 'ppdt_nEligibleVoters'] <-
+  "ppdt_nRegisteredVoters"
+
+comuni2018_party_votes <- merge(comuni2018_party_votes, comuni2018_place_stats, by = 'PRO_COM_T')
+
+comuni2018_votes <- merge(comuni2018_party_votes, comuni2018_candidate_votes, by = 'PRO_COM_T')
+names(comuni2018_votes)[2:9] <- paste0(names(comuni2018_votes)[2:9], "_2018")
+comuni_sp <- merge(comuni_sp, comuni2018_votes, by = 'PRO_COM_T')
+
+comuni_sp$M5S_diff <- 
+  with(as.data.frame(comuni_sp), 
+       ((M5S_2018 / ppdt_nRegisteredVoters_2018) - (M5S_2013 / ppdt_nRegisteredVoters_2013)) * 100)
+comuni_sp$PD_diff <- 
+  with(as.data.frame(comuni_sp), 
+       ((PD_2018 / ppdt_nRegisteredVoters_2018) - (PD_2013 / ppdt_nRegisteredVoters_2013)) * 100)
+comuni_sp$Lega_diff <- 
+  with(as.data.frame(comuni_sp), 
+       ((Lega_2018 / ppdt_nRegisteredVoters_2018) - (LN_2013 / ppdt_nRegisteredVoters_2013)) * 100)
+comuni_sp$FI_diff <- 
+  with(as.data.frame(comuni_sp), 
+       ((FI_2018 / ppdt_nRegisteredVoters_2018) - (PDL_2013 / ppdt_nRegisteredVoters_2013)) * 100)
+
+breaks <- c(-100, -50, -20, -10, -5, -2, 2, 5, 10, 20, 50)
+
+for (var  in c("M5S_diff","PD_diff", "Lega_diff", "FI_diff")) {
+  comuni_sp[[var]][comuni_sp$sezioni_scrutinate_2018/comuni_sp$sezioni_totali_2018<1] <- NA
+  comuni_sp[[var]][is.infinite(comuni_sp[[var]])] <- NA
+  comuni_sp[[paste0(var, "_brk")]] <- cut(comuni_sp[[var]], 
+                                          breaks = c(breaks, max(comuni_sp[[var]], na.rm = T)),
+                                          labels = c("-50%", "-20%" , 
+                                                     "-10%", "-5%", 
+                                                     "-2%", "0%", 
+                                                     "+2%", "+5%", "+10%",
+                                                     "+20%", "+50%"))
+}
+
+
+comuni_df <- as.data.frame(comuni_sp)
+
+assignMacroRegion <- function(x) {
+  if (x %in% c('1','3',
+               '7',"2")) {
+    return('North-west')
+  }
+  if(x %in% c('5','6',
+              "4",
+              "8")) {
+    return('North-east')
+  }
+  if (x %in% c("9", "10", "11", "12")) {
+    return('Centre')
+  }
+  if (x %in% c("13", "16", "17", 
+               "15", "18", "14")) {
+    return('South')
+  }
+  if (x %in% c("19", "20")) {
+    return("Islands")
+  }
+}
+
+comuni_df$macro_region <- sapply(as.character(comuni_df$COD_REG), assignMacroRegion)
+comuni_df$macro_region <- factor(comuni_df$macro_region, 
+                                 levels = c("North-west", "North-east",
+                                            "Centre", "South", "Islands" ))
+
+res_geo_details <- 
+  dbGetQuery(conn, 'SELECT "PRO_COM_T",
+             ST_Area(geom) AS area
+             FROM ita_ge18.comuni2018_geo;')
+
+res_demographics <-
+  dbGetQuery(conn, "SELECT * FROM ita_ge18.comuni2018_census2011_demographics;")
+
+comuni_df <- merge(comuni_df, res_geo_details, by = 'PRO_COM_T')
+comuni_df <- merge(comuni_df, res_demographics, by = 'PRO_COM_T')
+
+comuni_df$pop_density <- comuni_df$pop2011/comuni_df$area
+comuni_df$unemployment <- comuni_df$popunemployed2011/comuni_df$popnotworkforce2011
+
+comuni_df$housewive_perc <- comuni_df$pophousewife2011/comuni_df$popnotworkforce2011
+comuni_df$over65_perc <- comuni_df$pop65over2011/comuni_df$pop2011
+comuni_df$degree_perc <- comuni_df$popdegree2011/comuni_df$pop2011
+
+comuni_df$foreignpop_perc <- comuni_df$foreignpop2011/comuni_df$pop2011
+comuni_df$foreignpop_africa_perc <- comuni_df$foreignpopafrica2011/comuni_df$pop2011
+
+comuni_df$turnout <- comuni_df$ppdt_nAssignedVotes_2018/comuni_df$ppdt_nRegisteredVoters_2018
+
+comuni_df <- subset(comuni_df, sezioni_scrutinate_2018 > 0)
+
+redditi2016 <- dbReadTable(conn, c("ita_ge18","comuni2018_redditi2016"))
+comuni_df <- merge(comuni_df, redditi2016, by = 'PRO_COM_T', all.x = T)
+
+```
+
+```{r}
+
+comuni_df$M5S_2018_perc <- comuni_df$M5S_2018 / comuni_df$ppdt_nAssignedVotes_2018
+comuni_df$reddito_persona <- (comuni_df$redditoAmmontare / comuni_df$pop2011)
+
+this_mod <- lm(M5S_2018_perc~reddito_persona, data = subset(comuni_df, turnout < 1))
+```
+
+
+### M5S vote / income
+
+```{r, fig.cap=paste0("$n$=", nrow(subset(comuni_df, turnout < 1)), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Ministero Finanze (2015)")}
+ggplot() + 
+  geom_point(data = 
+               subset(comuni_df, turnout < 1), 
+             aes(M5S_2018_perc, reddito_persona, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = subset(comuni_df, turnout < 1), 
+              aes(M5S_2018_perc, reddito_persona),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) +
+  labs(x='M5S vote', y = "Income per person (mean, '000 euros)") + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+
+
+
+Vote difference (2018-2013)
+=====================================  
+
+Column {data-width=600}
+-------------------------------------
+
+### Vote at commune level (difference 2018-2013)
+
+```{r}
+italy_box_y <- c(36, 47.5)
+italy_box_x <- c(6.1, 19.5) 
+
+pal <- colorFactor(palette = "RdBu", domain = comuni_sp$M5S_diff_brk, reverse = TRUE)
+
+leaflet(comuni_sp) %>%
+  addPolygons(stroke = TRUE, color = 'gray', weight = 0.15, smoothFactor = 0.2, fillOpacity = 0.87,
+              fillColor = ~pal(M5S_diff_brk),
+              popup = ~paste0("Comune: <b>", COMUNE,
+                              "</b><table class = 'diff'>",
+                              "<tr><th></th><th><b>2012</b></th><th><b>2018</b></th></tr>",
+                              "<tr><td><b>M5S</b></td><td>", M5S_2013, "</td><td>", M5S_2018, "</td></tr>",
+                              "<tr><td><b>PD</b></td><td>", PD_2013, "</td><td>", PD_2018, "</td></tr>",
+                              "<tr><td><b>Lega</b></td><td>", LN_2013, "</td><td>", Lega_2018, "</td></tr>",
+                              "<tr><td><b>FI</b></td><td>", PDL_2013, "</td><td>", FI_2018, "</td></tr>", "</table>"),
+              highlight = highlightOptions(
+                weight = 4,
+                color = "black",
+                dashArray = "",
+                fillOpacity = 0.9,
+                bringToFront = TRUE)) %>%
+  setView(lng= 13, lat=41.8, zoom=6) %>%
+  addProviderTiles(providers$Stamen.TonerLite) %>%
+    addLegend("bottomleft", pal = pal, values = ~M5S_diff_brk, opacity = 1,
+            title = NA)
+```
+
+
+Column {.tabset}
+-------------------------------------
+
+### M5S vote diff. distribution 
+
+```{r, fig.width = 6, fig.height= 4, fig.cap=paste0("$n$=", nrow(comuni_df), " | Source: Ministero Interno (2018)")}
+ggplot(comuni_df, aes(M5S_diff/100, fill = macro_region)) + geom_density(alpha = 0.6) + theme_bw() + 
+  scale_x_continuous(labels=percent, limits = c(min(comuni_df$M5S_diff/100), 0.4)) + 
+  labs(x=NULL) + 
+  geom_vline(xintercept = median(comuni_df$M5S_diff/100, na.rm = T)) +
+  guides(fill=guide_legend(title="Macro region"))
+```
+
+
+```{r}
+this_mod <- lm(M5S_diff~turnout, data = subset(comuni_df, turnout < 1))
+```
+
+
+### M5S vote diff. / turnout
+
+```{r, fig.cap=paste0("$n$=", nrow(subset(comuni_df, turnout < 1)), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018)")}
+ggplot() + 
+  geom_point(data = 
+               subset(comuni_df, turnout < 1), 
+             aes(M5S_diff/100, turnout, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = subset(comuni_df, turnout < 1), 
+              aes(M5S_diff/100, turnout),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='vote diff.') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+```{r}
+this_mod <- lm(M5S_diff~PD_diff, data = subset(comuni_df, turnout < 1))
+```
+
+
+### M5S/PD vote diff.
+
+```{r, fig.cap=paste0("$n$=", sum(!is.na(comuni_df$M5S_diff) & !is.na(comuni_df$PD_diff)), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018)" )}
+ggplot() + 
+  geom_point(data = subset(comuni_df, turnout < 1), 
+             aes(M5S_diff/100, PD_diff/100, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = subset(comuni_df, turnout < 1), 
+              aes(M5S_diff/100, PD_diff/100),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote diff.', y='PD vote diff.') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+```{r}
+this_mod <- lm(M5S_diff~Lega_diff, data = subset(comuni_df, turnout < 1))
+```
+
+
+### M5S/Lega vote diff.
+
+```{r, fig.cap=paste0("$n$=", sum(is.na(comuni_df$M5S_diff) & is.na(comuni_df$Lega_diff)), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018)")}
+ggplot() + 
+  geom_point(data = subset(comuni_df, turnout < 1), 
+             aes(M5S_diff/100, Lega_diff/100, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = subset(comuni_df, turnout < 1), 
+              aes(M5S_diff/100, Lega_diff/100),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote diff.', y='Lega vote diff.') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+```{r}
+this_mod <- lm(M5S_diff~FI_diff, data = subset(comuni_df, turnout < 1))
+```
+
+
+### M5S/FI vote diff.
+
+```{r, fig.cap=paste0("$n$=", sum(is.na(comuni_df$M5S_diff) & is.na(comuni_df$Lega_diff)), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018)")}
+ggplot() + 
+  geom_point(data = subset(comuni_df, turnout < 1), 
+             aes(M5S_diff/100, FI_diff/100, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = subset(comuni_df, turnout < 1), 
+              aes(M5S_diff/100, FI_diff/100),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote diff.', y='FI vote diff.') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+```{r}
+this_mod <- lm(M5S_diff~log(pop_density), data = subset(comuni_df, turnout < 1))
+```
+
+
+### M5S vote diff./Pop. density
+
+```{r, fig.cap=paste0("$n$=", sum(!is.na(comuni_df$M5S_diff)), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = subset(comuni_df, turnout < 1), 
+             aes(M5S_diff/100, log(pop_density), color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = subset(comuni_df, turnout < 1), 
+              aes(M5S_diff/100, log(pop_density)),
+              se=FALSE) +
+    scale_x_continuous(labels = percent) +
+  labs(x='M5S vote diff.', y='← lower   Commune population density (log)   higher →') + 
+  theme_bw() +
+  theme(axis.text.y = element_blank()) +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+### M5S vote diff./Unemployment
+
+```{r}
+this_mod <- lm(M5S_diff~unemployment, data = subset(comuni_df, turnout < 1))
+```
+
+```{r, fig.cap=paste0("$n$=", sum(!is.na(comuni_df$M5S_diff)), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = subset(comuni_df, turnout < 1), 
+             aes(M5S_diff/100, unemployment, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = subset(comuni_df, turnout < 1), 
+              aes(M5S_diff/100, unemployment),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote diff.', y='Unemployed over total workforce') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+
+### M5S vote diff./Housewives
+
+```{r}
+this_mod <- lm(M5S_diff~housewive_perc, data = subset(comuni_df, turnout < 1))
+```
+
+```{r, fig.cap=paste0("$n$=", sum(!is.na(comuni_df$M5S_diff)), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = subset(comuni_df, turnout < 1), 
+             aes(M5S_diff/100, housewive_perc, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = subset(comuni_df, turnout < 1), 
+              aes(M5S_diff/100, housewive_perc),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote diff.', y='Housewives over total workforce') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+### M5S vote/Over 65
+
+```{r}
+this_mod <- lm(M5S_diff~over65_perc, data = subset(comuni_df, turnout < 1))
+```
+
+```{r, fig.cap=paste0("$n$=", sum(!is.na(comuni_df$M5S_diff)), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = subset(comuni_df, turnout < 1), 
+             aes(M5S_diff/100, over65_perc, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = subset(comuni_df, turnout < 1), 
+              aes(M5S_diff/100, over65_perc),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote diff.', y='People older than 65 over total population ') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+### M5S vote diff./Univ. degree
+
+```{r}
+this_mod <- lm(M5S_diff~degree_perc, data = subset(comuni_df, turnout < 1))
+```
+
+```{r, fig.cap=paste0("$n$=", sum(!is.na(comuni_df$M5S_diff)), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = subset(comuni_df, turnout < 1), 
+             aes(M5S_diff/100, degree_perc, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = subset(comuni_df, turnout < 1), 
+              aes(M5S_diff/100, degree_perc),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote diff.', y='With university degree over total population') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+### M5S vote diff./Foreign pop.
+
+```{r}
+this_mod <- lm(M5S_diff~foreignpop_perc, data = subset(comuni_df, turnout < 1))
+```
+
+```{r, fig.cap=paste0("$n$=", sum(!is.na(comuni_df$M5S_diff)), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = subset(comuni_df, turnout < 1), 
+             aes(M5S_diff/100, foreignpop_perc, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = subset(comuni_df, turnout < 1), 
+              aes(M5S_diff/100, foreignpop_perc),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote diff.', y='Foreign population over total population') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+### M5S vote diff./Foreign African pop.
+
+```{r}
+this_mod <- lm(M5S_diff~foreignpop_africa_perc, data = subset(comuni_df, turnout < 1))
+```
+
+```{r, fig.cap=paste0("$n$=", sum(!is.na(comuni_df$M5S_diff)), ", coefficient=", round(summary(this_mod)$coefficients[2],2), ", $R^2$=", round(summary(this_mod)$r.squared, 2), " | Source: Ministero Interno (2018), Census data (2011)")}
+ggplot() + 
+  geom_point(data = subset(comuni_df, turnout < 1), 
+             aes(M5S_diff/100, foreignpop_africa_perc, color = macro_region),
+             alpha = .6) + 
+  geom_smooth(data = subset(comuni_df, turnout < 1), 
+              aes(M5S_diff/100, foreignpop_africa_perc),
+              se=FALSE) +
+  scale_x_continuous(labels = percent) + 
+  scale_y_continuous(labels = percent) +
+  labs(x='M5S vote diff.', y='Foreign African population over total population') + 
+  theme_bw() +
+  guides(color = guide_legend(title="Macro region", 
+                              override.aes = list(size=7)))
+```
+
+
